@@ -2,15 +2,36 @@
 # Place this file at ~/printer_data/config/nfc_spoolman.cfg
 
 [nfc]
-# Serial device for the PN532 reader
-device = /dev/ttyUSB0:115200
+# Reader type: pn532, pn5180, acr1552u
+reader = pn532
+
+# ── PN532 settings (UART) ──────────────────────────────────
+# Only TigerTag (ISO 14443A / NTAG213)
+pn532_device = /dev/ttyUSB0
+pn532_baudrate = 115200
+
+# ── PN5180 settings (SPI) ──────────────────────────────────
+# TigerTag + OpenPrintTag (ISO 14443A + ISO 15693)
+# pn5180_spi_bus = 0
+# pn5180_spi_cs = 0
+# pn5180_busy_pin = 25
+# pn5180_reset_pin = 24
+
+# ── ACR1552U settings (USB / PC/SC) ────────────────────────
+# TigerTag + OpenPrintTag (ISO 14443A + ISO 15693)
+# acr1552u_reader_name = ACS ACR1552U
+
+# ── Common settings ─────────────────────────────────────────
 
 # How often to poll for a tag (seconds)
 poll_interval = 0.5
 
 # Minimum seconds between activations of the same tag
-# Prevents re-triggering if the tag is left on the reader
 debounce_time = 5.0
+
+# Auto-create spool in Spoolman if tag not recognized
+# (only for OpenPrintTag — creates vendor + filament + spool from tag data)
+auto_create = false
 
 [spoolman]
 # URL of your Spoolman instance

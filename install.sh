@@ -16,9 +16,11 @@ python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip
 "$VENV_DIR/bin/pip" install pyserial requests
 
-# Copy script
-echo "Installing nfc_spoolman.py..."
+# Copy script and readers package
+echo "Installing nfc_spoolman.py and readers..."
 cp "$SCRIPT_DIR/nfc_spoolman.py" "$INSTALL_DIR/nfc_spoolman.py"
+mkdir -p "$INSTALL_DIR/readers"
+cp "$SCRIPT_DIR/readers/"*.py "$INSTALL_DIR/readers/"
 
 # Copy config if it doesn't exist
 if [ ! -f "$CONFIG_DIR/nfc_spoolman.cfg" ]; then

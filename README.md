@@ -1,27 +1,34 @@
 # klipper-nfc
 
-A daemon that runs on a Klipper host to automatically select the active Spoolman spool by scanning TigerTag NFC tags on a PN532 reader.
+A daemon that runs on a Klipper host to automatically select the active Spoolman spool by scanning NFC tags. Supports both TigerTag (NTAG213) and OpenPrintTag (NFC-V / ICODE SLIX2) formats.
 
 ## How it works
 
-1. The daemon polls a PN532 NFC reader connected via UART (e.g. `/dev/ttyUSB0`)
-2. When an NTAG213 tag is detected, it reads the TigerTag binary data from the tag's user memory (pages 4-39, 144 bytes)
-3. The raw binary is base64-encoded and POSTed to Spoolman's `/api/v1/nfc/lookup` endpoint
-4. If Spoolman matches the tag to a spool, the daemon tells Moonraker to set that spool as active via `POST /server/spoolman/spool_id`
+1. The daemon polls a configured NFC reader for tags
+2. When a tag is detected, it reads the raw tag memory and sends it to Spoolman's `/api/v1/nfc/lookup` endpoint
+3. Spoolman auto-detects the tag format, decodes it, and matches it to a spool
+4. If a match is found, the daemon tells Moonraker to set that spool as active
 
-Tags are matched in Spoolman by:
-- **External ID**: the tag's `id_product` field is matched against filaments with `external_id = "tigertag_{id_product}"` (for tags from the TigerTag product database)
-- **Spool ID fallback**: if no external ID match, `id_product` is tried as a direct Spoolman spool ID (for tags written by Spoolman itself)
+Tag format is auto-detected by Spoolman:
+- **TigerTag** (ISO 14443A / NTAG213): matched by `id_product` field against filament `external_id`
+- **OpenPrintTag** (ISO 15693 / NFC-V): matched by `instance_uuid` derived from the tag's hardware UID
 
 The daemon includes debouncing so the same tag won't re-trigger within a configurable window.
+
+## Supported readers
+
+| Reader | Interface | TigerTag | OpenPrintTag | Dependencies |
+|--------|-----------|----------|--------------|--------------|
+| **PN532** | UART | Yes | No | `pyserial` |
+| **PN5180** | SPI + GPIO | Yes | Yes | `spidev`, `gpiod` or `RPi.GPIO` |
+| **ACR1552U** | USB | Yes | Yes | `pyscard`, `pcscd` |
 
 ## Requirements
 
 - A Klipper host (Raspberry Pi, BeagleBone, etc.) running Moonraker
-- A **PN532 NFC reader** connected via UART (USB-UART adapter or GPIO)
-- **Spoolman** with the TigerTag/NFC endpoints enabled (`SPOOLMAN_TIGERTAG_ENABLED=TRUE`)
+- One of the supported NFC readers (see above)
+- **Spoolman** with NFC endpoints enabled (`SPOOLMAN_TIGERTAG_ENABLED=TRUE`, `SPOOLMAN_NFC_ENABLED=TRUE`)
 - Python 3.10+
-- NTAG213 tags encoded in TigerTag format
 
 ## Installation
 
@@ -34,11 +41,22 @@ cd klipper-nfc
 ```
 
 The installer will:
-- Create a Python venv at `~/nfc-spoolman-env` with `pyserial` and `requests`
-- Copy `nfc_spoolman.py` to your home directory
+- Create a Python venv at `~/nfc-spoolman-env` with base dependencies (`pyserial`, `requests`)
+- Copy the daemon and readers to your home directory
 - Copy the example config to `~/printer_data/config/nfc_spoolman.cfg` (if it doesn't already exist)
 - Install and enable a systemd service (`nfc-spoolman`)
 - Add the service to `moonraker.asvc` so it appears in Mainsail/Fluidd
+
+For PN5180 or ACR1552U readers, install additional dependencies:
+
+```bash
+# PN5180 (SPI)
+~/nfc-spoolman-env/bin/pip install spidev gpiod
+
+# ACR1552U (USB/PC/SC)
+sudo apt install pcscd libpcsclite-dev
+~/nfc-spoolman-env/bin/pip install pyscard
+```
 
 ## Configuration
 
@@ -46,21 +64,33 @@ Edit `~/printer_data/config/nfc_spoolman.cfg`:
 
 ```ini
 [nfc]
-# Serial device and baud rate for the PN532 reader
-device = /dev/ttyUSB0:115200
+# Reader type: pn532, pn5180, acr1552u
+reader = pn532
 
-# How often to poll for a tag (seconds)
+# PN532 (UART)
+pn532_device = /dev/ttyUSB0
+pn532_baudrate = 115200
+
+# PN5180 (SPI) — uncomment if using
+# pn5180_spi_bus = 0
+# pn5180_spi_cs = 0
+# pn5180_busy_pin = 25
+# pn5180_reset_pin = 24
+
+# ACR1552U (USB) — uncomment if using
+# acr1552u_reader_name = ACS ACR1552U
+
+# Common
 poll_interval = 0.5
-
-# Ignore the same tag for this many seconds after activation
 debounce_time = 5.0
 
+# Auto-create spool when scanning an unrecognized OpenPrintTag
+auto_create = false
+
 [spoolman]
-# URL of your Spoolman instance
 url = http://localhost:7912
 
 [moonraker]
-# URL of the local Moonraker instance
 url = http://localhost:7125
 ```
 
@@ -84,11 +114,23 @@ Logs are also written to `~/printer_data/logs/nfc_spoolman.log`.
 
 ## Wiring
 
-The PN532 must be set to UART mode (check the DIP switches or solder jumpers on your board). Connect it to the Klipper host via a USB-UART adapter, or directly to GPIO UART pins. The default expects the device at `/dev/ttyUSB0` at 115200 baud.
+### PN532 (UART)
+Set the PN532 to UART mode (DIP switches / solder jumpers). Connect via a USB-UART adapter or directly to GPIO UART pins.
 
-You can verify the reader works at the OS level with libnfc:
+### PN5180 (SPI)
+Connect to SPI0 (or your chosen bus) plus two GPIO pins for BUSY and RESET. The PN5180 needs 5V for the RF antenna and 3.3V for logic.
+
+### ACR1552U (USB)
+Plug in the USB reader. Ensure `pcscd` is running (`sudo systemctl start pcscd`).
+
+Verify any reader works at the OS level:
 
 ```bash
+# For PN532 with libnfc
 sudo apt install libnfc-bin
 nfc-list
+
+# For ACR1552U with pcsc-tools
+sudo apt install pcsc-tools
+pcsc_scan
 ```

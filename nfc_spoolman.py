@@ -2,10 +2,13 @@
 """
 nfc_spoolman.py - NFC spool selection daemon for Klipper/Spoolman
 
-Polls a PN532 NFC reader (UART) for TigerTag spool tags, looks up the spool
-in Spoolman, and sets the active spool in Moonraker.
+Polls an NFC reader for TigerTag or OpenPrintTag spool tags, looks up the
+spool in Spoolman, and sets the active spool in Moonraker.
 
-Uses pyserial to talk PN532 protocol directly — no nfcpy/libnfc dependency.
+Supports multiple reader backends:
+  - pn532:    PN532 over UART (ISO 14443A only — TigerTag)
+  - pn5180:   PN5180 over SPI (ISO 14443A + ISO 15693 — TigerTag + OpenPrintTag)
+  - acr1552u: ACR1552U over USB/PC/SC (ISO 14443A + ISO 15693 — TigerTag + OpenPrintTag)
 
 Configuration: ~/printer_data/config/nfc_spoolman.cfg
 """
@@ -14,12 +17,12 @@ import base64
 import configparser
 import logging
 import os
-import struct
 import sys
 import time
 
-import serial
 import requests
+
+from readers.base import NfcReader, TagRead
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -34,190 +37,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-
-# ── PN532 UART Protocol ──────────────────────────────────────────────────────
-
-PN532_PREAMBLE = 0x00
-PN532_STARTCODE1 = 0x00
-PN532_STARTCODE2 = 0xFF
-PN532_HOSTTOPN532 = 0xD4
-PN532_PN532TOHOST = 0xD5
-
-# Commands
-PN532_CMD_SAMCONFIGURATION = 0x14
-PN532_CMD_INLISTPASSIVETARGET = 0x4A
-PN532_CMD_INDATAEXCHANGE = 0x40
-PN532_CMD_GETFIRMWAREVERSION = 0x02
-
-# NTAG read command
-NTAG_CMD_READ = 0x30
-
-
-class PN532Uart:
-    """Low-level PN532 driver over UART."""
-
-    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 1.0):
-        self.ser = serial.Serial(port, baudrate, timeout=timeout)
-        self._wakeup()
-
-    def _wakeup(self):
-        """Send wakeup sequence (long preamble) to PN532."""
-        self.ser.write(b'\x55' * 24 + b'\x00\x00\x00')
-        time.sleep(0.5)
-        self.ser.reset_input_buffer()
-
-    def close(self):
-        self.ser.close()
-
-    def _write_frame(self, data: bytes):
-        """Write a PN532 normal information frame."""
-        length = len(data) + 1  # +1 for TFI byte
-        lcs = (~length + 1) & 0xFF
-        frame = bytearray([
-            PN532_PREAMBLE,
-            PN532_STARTCODE1,
-            PN532_STARTCODE2,
-            length & 0xFF,
-            lcs,
-            PN532_HOSTTOPN532,
-        ])
-        frame.extend(data)
-        # DCS: checksum of TFI + data
-        dcs = PN532_HOSTTOPN532
-        for b in data:
-            dcs += b
-        dcs = (~dcs + 1) & 0xFF
-        frame.append(dcs)
-        frame.append(0x00)  # postamble
-        self.ser.write(bytes(frame))
-
-    def _read_response(self, timeout: float = 1.0) -> bytes | None:
-        """Read ACK + response frame from PN532, return data after TFI byte."""
-        deadline = time.monotonic() + timeout
-        buf = bytearray()
-        while time.monotonic() < deadline:
-            chunk = self.ser.read(self.ser.in_waiting or 1)
-            if chunk:
-                buf.extend(chunk)
-            # Scan for all 00 FF start codes in the buffer
-            raw = bytes(buf)
-            pos = 0
-            while True:
-                idx = raw.find(b'\x00\xFF', pos)
-                if idx < 0:
-                    break
-                remaining = raw[idx:]
-                if len(remaining) < 4:
-                    break  # need more data
-                length = remaining[2]
-                if length == 0:
-                    # ACK frame (00 FF 00 FF 00) — skip it
-                    pos = idx + 4
-                    continue
-                # Normal frame: 00 FF LEN LCS TFI DATA... DCS 00
-                total = 2 + 1 + 1 + length + 1 + 1
-                if len(remaining) < total:
-                    break  # need more data
-                # TFI is at offset 4, data starts at offset 5
-                tfi = remaining[4]
-                if tfi != PN532_PN532TOHOST:
-                    pos = idx + 2
-                    continue
-                data = remaining[5:4 + length]  # length includes TFI
-                return bytes(data)
-            time.sleep(0.01)
-        return None
-
-    def send_command(self, cmd: int, params: bytes = b'', timeout: float = 1.0) -> bytes | None:
-        """Send a command and return the response data."""
-        self.ser.reset_input_buffer()
-        data = bytes([cmd]) + params
-        self._write_frame(data)
-
-        resp = self._read_response(timeout=timeout)
-        if resp is None:
-            log.debug("No response received")
-            return None
-
-        # First byte of response should be cmd+1
-        if len(resp) > 0 and resp[0] != (cmd + 1):
-            log.debug(f"Unexpected response command: 0x{resp[0]:02x} (expected 0x{cmd+1:02x})")
-            return None
-
-        return resp[1:]  # skip command byte
-
-    def get_firmware_version(self) -> tuple | None:
-        """Get PN532 firmware version. Returns (IC, Ver, Rev, Support) or None."""
-        resp = self.send_command(PN532_CMD_GETFIRMWAREVERSION)
-        if resp and len(resp) >= 4:
-            return (resp[0], resp[1], resp[2], resp[3])
-        return None
-
-    def sam_configuration(self) -> bool:
-        """Configure the SAM (Security Access Module) for normal mode."""
-        # Mode 0x01 = Normal, Timeout 0x14 = ~1s, IRQ = off
-        resp = self.send_command(PN532_CMD_SAMCONFIGURATION, bytes([0x01, 0x14, 0x01]))
-        return resp is not None
-
-    def poll_for_tag(self, timeout: float = 1.0) -> bytes | None:
-        """
-        Poll for a single ISO14443A tag.
-        Returns the UID bytes, or None if no tag found.
-        """
-        # MaxTg=1, BrTy=0x00 (106 kbps type A)
-        resp = self.send_command(
-            PN532_CMD_INLISTPASSIVETARGET,
-            bytes([0x01, 0x00]),
-            timeout=timeout,
-        )
-        if resp is None or len(resp) < 6:
-            return None
-
-        num_tags = resp[0]
-        if num_tags == 0:
-            return None
-
-        # Parse target data: Tg(1) + SENS_RES(2) + SEL_RES(1) + NFCIDLength(1) + NFCID(n)
-        nfcid_len = resp[4]
-        if len(resp) < 5 + nfcid_len:
-            return None
-        uid = resp[5:5 + nfcid_len]
-        return bytes(uid)
-
-    def ntag_read_page(self, page: int) -> bytes | None:
-        """
-        Read 4 pages (16 bytes) starting at the given page number.
-        NTAG READ command returns 16 bytes at a time.
-        """
-        # InDataExchange: Tg=0x01, NTAG READ cmd, page number
-        resp = self.send_command(
-            PN532_CMD_INDATAEXCHANGE,
-            bytes([0x01, NTAG_CMD_READ, page]),
-            timeout=1.0,
-        )
-        if resp is None or len(resp) < 1:
-            return None
-        status = resp[0]
-        if status != 0x00:
-            log.debug(f"NTAG read error at page {page}: status 0x{status:02x}")
-            return None
-        return resp[1:]  # 16 bytes
-
-    def read_ntag_user_memory(self) -> bytes | None:
-        """
-        Read NTAG213 user memory: pages 4-39 (36 pages = 144 bytes).
-        NTAG READ returns 4 pages (16 bytes) per call, so we need 9 reads.
-        """
-        data = bytearray()
-        for start_page in range(4, 40, 4):
-            chunk = self.ntag_read_page(start_page)
-            if chunk is None:
-                log.error(f"Failed to read pages {start_page}-{start_page+3}")
-                return None
-            data.extend(chunk)
-        # We read pages 4-43 (40 pages = 160 bytes), trim to 4-39 (144 bytes)
-        return bytes(data[:144])
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -235,16 +54,61 @@ def load_config():
     return cfg
 
 
+def create_reader(cfg: configparser.ConfigParser) -> NfcReader:
+    """Create the appropriate NFC reader from config."""
+    reader_type = cfg.get("nfc", "reader", fallback="pn532").lower()
+
+    if reader_type == "pn532":
+        from readers.pn532 import PN532Reader  # noqa: PLC0415
+
+        device_str = cfg.get("nfc", "pn532_device", fallback="/dev/ttyUSB0")
+        baudrate = cfg.getint("nfc", "pn532_baudrate", fallback=115200)
+
+        # Backwards compatibility: parse "device = /dev/ttyUSB0:115200"
+        if cfg.has_option("nfc", "device") and not cfg.has_option("nfc", "pn532_device"):
+            device_str = cfg.get("nfc", "device")
+            if ":" in device_str:
+                device_str, baud_str = device_str.rsplit(":", 1)
+                baudrate = int(baud_str)
+
+        return PN532Reader(port=device_str, baudrate=baudrate)
+
+    if reader_type == "pn5180":
+        from readers.pn5180 import PN5180Reader  # noqa: PLC0415
+
+        return PN5180Reader(
+            spi_bus=cfg.getint("nfc", "pn5180_spi_bus", fallback=0),
+            spi_cs=cfg.getint("nfc", "pn5180_spi_cs", fallback=0),
+            busy_pin=cfg.getint("nfc", "pn5180_busy_pin", fallback=25),
+            reset_pin=cfg.getint("nfc", "pn5180_reset_pin", fallback=24),
+        )
+
+    if reader_type == "acr1552u":
+        from readers.acr1552u import ACR1552UReader  # noqa: PLC0415
+
+        return ACR1552UReader(
+            reader_name=cfg.get("nfc", "acr1552u_reader_name", fallback="ACS ACR1552U"),
+        )
+
+    log.error(f"Unknown reader type: {reader_type}")
+    sys.exit(1)
+
+
 # ── Spoolman ──────────────────────────────────────────────────────────────────
 
-def lookup_spool(spoolman_url: str, raw_pages: bytes) -> int | None:
-    """
-    POST the raw NTAG213 user memory (pages 4-39, 144 bytes) to Spoolman's
-    /api/v1/nfc/lookup endpoint and return the matched spool_id, or None.
-    """
+def lookup_spool(spoolman_url: str, tag: TagRead, auto_create: bool = False) -> int | None:
+    """POST tag data to Spoolman's /api/v1/nfc/lookup and return matched spool_id."""
     payload = {
-        "raw_data_b64": base64.b64encode(raw_pages).decode("ascii")
+        "raw_data_b64": base64.b64encode(tag.data).decode("ascii"),
+        "nfc_tag_uid": tag.uid.hex(),
+        "auto_create": auto_create,
     }
+
+    # Help Spoolman with tag type detection
+    if tag.protocol == "iso15693":
+        payload["tag_type"] = "openprinttag"
+    elif tag.protocol == "iso14443a":
+        payload["tag_type"] = "tigertag"
 
     try:
         resp = requests.post(
@@ -256,10 +120,12 @@ def lookup_spool(spoolman_url: str, raw_pages: bytes) -> int | None:
         data = resp.json()
 
         if data.get("success") and data.get("spool_id") is not None:
+            tag_fmt = data.get("tag_format", "unknown")
+            log.info(f"Spoolman: matched spool ID {data['spool_id']} (format: {tag_fmt})")
             return int(data["spool_id"])
-        else:
-            log.warning(f"Spoolman lookup: {data.get('message', 'no match')}")
-            return None
+
+        log.warning(f"Spoolman lookup: {data.get('message', 'no match')}")
+        return None
 
     except requests.RequestException as e:
         log.error(f"Spoolman request failed: {e}")
@@ -290,57 +156,41 @@ def set_active_spool(moonraker_url: str, spool_id: int) -> bool:
 def main():
     cfg = load_config()
 
-    device_str = cfg.get("nfc", "device", fallback="/dev/ttyUSB0:115200")
-    # Parse device:baudrate
-    if ":" in device_str:
-        device, baud_str = device_str.rsplit(":", 1)
-        baudrate = int(baud_str)
-    else:
-        device = device_str
-        baudrate = 115200
-
     poll_interval = cfg.getfloat("nfc", "poll_interval", fallback=0.5)
     debounce_time = cfg.getfloat("nfc", "debounce_time", fallback=5.0)
+    auto_create = cfg.getboolean("nfc", "auto_create", fallback=False)
     spoolman_url = cfg.get("spoolman", "url", fallback="http://localhost:7912")
     moonraker_url = cfg.get("moonraker", "url", fallback="http://localhost:7125")
 
+    reader = create_reader(cfg)
+
     log.info("Starting NFC Spoolman daemon")
-    log.info(f"  NFC device:    {device} @ {baudrate}")
+    log.info(f"  Reader:        {reader.name()}")
     log.info(f"  Spoolman:      {spoolman_url}")
     log.info(f"  Moonraker:     {moonraker_url}")
     log.info(f"  Poll interval: {poll_interval}s")
     log.info(f"  Debounce:      {debounce_time}s")
+    log.info(f"  Auto-create:   {auto_create}")
 
     last_uid: str | None = None
     last_time: float = 0.0
 
     while True:
-        pn532 = None
         try:
-            pn532 = PN532Uart(device, baudrate)
-            fw = pn532.get_firmware_version()
-            if fw is None:
-                log.error("Could not communicate with PN532 — retrying in 5s")
-                pn532.close()
-                time.sleep(5)
-                continue
-            log.info(f"PN532 firmware: IC=0x{fw[0]:02x} Ver={fw[1]}.{fw[2]} Support=0x{fw[3]:02x}")
-
-            if not pn532.sam_configuration():
-                log.error("SAM configuration failed — retrying in 5s")
-                pn532.close()
+            if not reader.open():
+                log.error(f"{reader.name()}: open failed — retrying in 5s")
                 time.sleep(5)
                 continue
 
-            log.info("NFC reader ready, polling for tags...")
+            log.info(f"{reader.name()}: ready, polling for tags...")
 
             while True:
-                uid = pn532.poll_for_tag(timeout=1.0)
-                if uid is None:
+                tag = reader.poll(timeout=1.0)
+                if tag is None:
                     time.sleep(poll_interval)
                     continue
 
-                uid_hex = uid.hex()
+                uid_hex = tag.uid.hex()
                 now = time.monotonic()
 
                 # Debounce
@@ -349,28 +199,16 @@ def main():
                     time.sleep(poll_interval)
                     continue
 
-                log.info(f"Tag detected: UID={uid_hex}")
-
-                # Read NTAG user memory (pages 4-39)
-                raw_data = pn532.read_ntag_user_memory()
-                if raw_data is None:
-                    log.error("Failed to read tag memory")
-                    time.sleep(poll_interval)
-                    continue
-
-                log.info(f"Read {len(raw_data)} bytes from tag")
-                log.debug(f"Raw: {raw_data[:36].hex()}")
+                log.info(f"Tag detected: UID={uid_hex} protocol={tag.protocol} ({len(tag.data)} bytes)")
 
                 # Look up spool in Spoolman
-                spool_id = lookup_spool(spoolman_url, raw_data)
+                spool_id = lookup_spool(spoolman_url, tag, auto_create=auto_create)
                 if spool_id is None:
                     log.warning(f"No spool found for tag {uid_hex}")
                     last_uid = uid_hex
                     last_time = now
                     time.sleep(poll_interval)
                     continue
-
-                log.info(f"Matched spool ID: {spool_id}")
 
                 # Set active spool in Moonraker
                 if set_active_spool(moonraker_url, spool_id):
@@ -379,21 +217,15 @@ def main():
 
                 time.sleep(poll_interval)
 
-        except serial.SerialException as e:
-            log.error(f"Serial error: {e} — retrying in 5s")
-            time.sleep(5)
         except KeyboardInterrupt:
             log.info("Shutting down")
+            reader.close()
             sys.exit(0)
         except Exception as e:
             log.exception(f"Unexpected error: {e} — retrying in 5s")
             time.sleep(5)
         finally:
-            if pn532 is not None:
-                try:
-                    pn532.close()
-                except Exception:
-                    pass
+            reader.close()
 
 
 if __name__ == "__main__":
