@@ -9,6 +9,7 @@ reader = pn532
 # Only TigerTag (ISO 14443A / NTAG213)
 pn532_device = /dev/ttyUSB0
 pn532_baudrate = 115200
+# Legacy shorthand (also accepted): device = /dev/ttyUSB0:115200
 
 # ── PN5180 settings (SPI) ──────────────────────────────────
 # TigerTag + OpenPrintTag (ISO 14443A + ISO 15693)
