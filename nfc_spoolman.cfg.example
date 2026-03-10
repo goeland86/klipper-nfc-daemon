@@ -1,0 +1,21 @@
+# NFC Spoolman Daemon Configuration
+# Place this file at ~/printer_data/config/nfc_spoolman.cfg
+
+[nfc]
+# Serial device for the PN532 reader
+device = /dev/ttyUSB0:115200
+
+# How often to poll for a tag (seconds)
+poll_interval = 0.5
+
+# Minimum seconds between activations of the same tag
+# Prevents re-triggering if the tag is left on the reader
+debounce_time = 5.0
+
+[spoolman]
+# URL of your Spoolman instance
+url = http://localhost:7912
+
+[moonraker]
+# URL of the local Moonraker instance
+url = http://localhost:7125

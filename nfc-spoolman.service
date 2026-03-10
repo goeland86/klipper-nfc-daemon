@@ -1,0 +1,14 @@
+[Unit]
+Description=NFC Spoolman spool selector daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+ExecStart=/home/debian/nfc-spoolman-env/bin/python3 /home/debian/nfc_spoolman.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
