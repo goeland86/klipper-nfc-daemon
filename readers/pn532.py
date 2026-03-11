@@ -32,7 +32,15 @@ class PN532Reader(NfcReader):
 
     def open(self) -> bool:
         try:
-            self._ser = serial.Serial(self._port, self._baudrate, timeout=1.0)
+            # Open without DTR/RTS toggle to avoid resetting an ESP32 bridge
+            self._ser = serial.Serial()
+            self._ser.port = self._port
+            self._ser.baudrate = self._baudrate
+            self._ser.timeout = 1.0
+            self._ser.dtr = False
+            self._ser.rts = False
+            self._ser.open()
+            time.sleep(0.5)
             self._wakeup()
             fw = self._get_firmware_version()
             if fw is None:
