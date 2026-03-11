@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 import time
-import uuid
 
 import requests
 
@@ -234,6 +233,72 @@ def update_mainsail_preset(moonraker_url: str, spool_data: dict) -> bool:
         return False
 
 
+# ── Klipper variables ────────────────────────────────────────────────────────
+
+def run_gcode(moonraker_url: str, gcode: str) -> bool:
+    """Execute a GCode command on Klipper via Moonraker."""
+    try:
+        resp = requests.post(
+            f"{moonraker_url}/printer/gcode/script",
+            json={"script": gcode},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        log.error(f"GCode execution failed: {e}")
+        return False
+
+
+def push_klipper_variables(moonraker_url: str, spool_data: dict) -> bool:
+    """Push filament metadata to Klipper via SAVE_VARIABLE commands.
+
+    Stores variables that PRINT_START and other macros can reference:
+      printer.save_variables.variables.nfc_spool_id
+      printer.save_variables.variables.nfc_material
+      printer.save_variables.variables.nfc_extruder_temp
+      printer.save_variables.variables.nfc_bed_temp
+      printer.save_variables.variables.nfc_vendor
+      printer.save_variables.variables.nfc_filament_name
+      printer.save_variables.variables.nfc_color_hex
+      printer.save_variables.variables.nfc_diameter
+
+    Requires [save_variables] in printer.cfg:
+      [save_variables]
+      filename: ~/printer_data/config/saved_variables.cfg
+    """
+    filament = spool_data.get("filament", {})
+    vendor = filament.get("vendor", {}) or {}
+
+    variables = {
+        "nfc_spool_id": spool_data.get("id", 0),
+        "nfc_material": filament.get("material") or "",
+        "nfc_extruder_temp": int(filament.get("settings_extruder_temp") or 0),
+        "nfc_bed_temp": int(filament.get("settings_bed_temp") or 0),
+        "nfc_vendor": vendor.get("name") or "",
+        "nfc_filament_name": filament.get("name") or "",
+        "nfc_color_hex": filament.get("color_hex") or "",
+        "nfc_diameter": float(filament.get("diameter") or 0),
+    }
+
+    cmds = []
+    for key, val in variables.items():
+        if isinstance(val, str):
+            # Strings need nested quotes for SAVE_VARIABLE
+            cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE='\"{ val }\"'")
+        elif isinstance(val, float):
+            cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE={val:.2f}")
+        else:
+            cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE={val}")
+
+    gcode = "\n".join(cmds)
+    success = run_gcode(moonraker_url, gcode)
+    if success:
+        log.info(f"Klipper variables set: material={variables['nfc_material']}, "
+                 f"extruder={variables['nfc_extruder_temp']}, bed={variables['nfc_bed_temp']}")
+    return success
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -243,6 +308,7 @@ def main():
     debounce_time = cfg.getfloat("nfc", "debounce_time", fallback=5.0)
     auto_create = cfg.getboolean("nfc", "auto_create", fallback=False)
     mainsail_preset = cfg.getboolean("nfc", "mainsail_preset", fallback=True)
+    klipper_variables = cfg.getboolean("nfc", "klipper_variables", fallback=True)
     spoolman_url = cfg.get("spoolman", "url", fallback="http://localhost:7912")
     moonraker_url = cfg.get("moonraker", "url", fallback="http://localhost:7125")
 
@@ -256,6 +322,7 @@ def main():
     log.info(f"  Debounce:      {debounce_time}s")
     log.info(f"  Auto-create:   {auto_create}")
     log.info(f"  Mainsail preset: {mainsail_preset}")
+    log.info(f"  Klipper vars:  {klipper_variables}")
 
     last_uid: str | None = None
     last_time: float = 0.0
@@ -300,11 +367,19 @@ def main():
                     last_uid = uid_hex
                     last_time = now
 
-                    # Update Mainsail preheat preset with filament temps
-                    if mainsail_preset:
+                    # Fetch spool details for downstream integrations
+                    spool_data = None
+                    if mainsail_preset or klipper_variables:
                         spool_data = get_spool_details(spoolman_url, spool_id)
-                        if spool_data:
+
+                    if spool_data:
+                        # Update Mainsail preheat preset with filament temps
+                        if mainsail_preset:
                             update_mainsail_preset(moonraker_url, spool_data)
+
+                        # Push filament metadata to Klipper SAVE_VARIABLE
+                        if klipper_variables:
+                            push_klipper_variables(moonraker_url, spool_data)
 
                 time.sleep(poll_interval)
 

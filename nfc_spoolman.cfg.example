@@ -38,6 +38,11 @@ auto_create = false
 # Creates/updates an "NFC: ..." preset with extruder and bed temps from Spoolman
 mainsail_preset = true
 
+# Push filament metadata to Klipper via SAVE_VARIABLE
+# Stores nfc_material, nfc_extruder_temp, nfc_bed_temp, etc. for use in macros
+# Requires [save_variables] in printer.cfg
+klipper_variables = true
+
 [spoolman]
 # URL of your Spoolman instance
 url = http://localhost:7912

@@ -7,7 +7,10 @@ A daemon that runs on a Klipper host to automatically select the active Spoolman
 1. The daemon polls a configured NFC reader for tags
 2. When a tag is detected, it reads the raw tag memory and sends it to Spoolman's `/api/v1/nfc/lookup` endpoint
 3. Spoolman auto-detects the tag format, decodes it, and matches it to a spool
-4. If a match is found, the daemon tells Moonraker to set that spool as active
+4. If a match is found, the daemon:
+   - Sets the active spool in Moonraker
+   - Pushes filament metadata to Klipper via `SAVE_VARIABLE` (for use in macros)
+   - Updates a Mainsail preheat preset with the filament's temperatures
 
 Tag format is auto-detected by Spoolman:
 - **TigerTag** (ISO 14443A / NTAG213): matched by `id_product` field against filament `external_id`
@@ -87,6 +90,12 @@ debounce_time = 5.0
 # Auto-create spool when scanning an unrecognized OpenPrintTag
 auto_create = false
 
+# Update a Mainsail preheat preset with filament temps on spool detect
+mainsail_preset = true
+
+# Push filament metadata to Klipper SAVE_VARIABLE (see below)
+klipper_variables = true
+
 [spoolman]
 url = http://localhost:7912
 
@@ -111,6 +120,47 @@ sudo systemctl restart nfc-spoolman
 ```
 
 Logs are also written to `~/printer_data/logs/nfc_spoolman.log`.
+
+## Klipper integration
+
+### Klipper variables (`klipper_variables = true`)
+
+When enabled, the daemon pushes filament metadata to Klipper via `SAVE_VARIABLE` commands. This requires a `[save_variables]` section in your `printer.cfg`:
+
+```ini
+[save_variables]
+filename: ~/printer_data/config/saved_variables.cfg
+```
+
+The following variables are set on each NFC scan:
+
+| Variable | Type | Example |
+|----------|------|---------|
+| `nfc_spool_id` | int | `42` |
+| `nfc_material` | string | `"PLA"` |
+| `nfc_extruder_temp` | int | `210` |
+| `nfc_bed_temp` | int | `60` |
+| `nfc_vendor` | string | `"Rosa3D"` |
+| `nfc_filament_name` | string | `"PLA Starter"` |
+| `nfc_color_hex` | string | `"ff9724"` |
+| `nfc_diameter` | float | `1.75` |
+
+Use them in your `PRINT_START` macro:
+
+```ini
+[gcode_macro PRINT_START]
+gcode:
+  {% set svv = printer.save_variables.variables %}
+  {% set extruder = svv.nfc_extruder_temp|default(200)|int %}
+  {% set bed = svv.nfc_bed_temp|default(60)|int %}
+  M140 S{bed}       ; start bed heating
+  M109 S{extruder}  ; wait for extruder
+  M190 S{bed}       ; wait for bed
+```
+
+### Mainsail preset (`mainsail_preset = true`)
+
+When enabled, the daemon creates/updates a preheat preset named "NFC: Vendor Material Name" in Mainsail. This appears in the temperature panel as a one-click preheat button. The preset is always updated in-place (same ID) so you won't get duplicate entries.
 
 ## Wiring
 
