@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 
 import requests
 
@@ -132,6 +133,22 @@ def lookup_spool(spoolman_url: str, tag: TagRead, auto_create: bool = False) -> 
         return None
 
 
+# ── Spoolman spool details ────────────────────────────────────────────────────
+
+def get_spool_details(spoolman_url: str, spool_id: int) -> dict | None:
+    """Fetch full spool details from Spoolman (filament, vendor, temps, etc.)."""
+    try:
+        resp = requests.get(
+            f"{spoolman_url}/api/v1/spool/{spool_id}",
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as e:
+        log.error(f"Spoolman spool detail request failed: {e}")
+        return None
+
+
 # ── Moonraker ─────────────────────────────────────────────────────────────────
 
 def set_active_spool(moonraker_url: str, spool_id: int) -> bool:
@@ -151,6 +168,72 @@ def set_active_spool(moonraker_url: str, spool_id: int) -> bool:
         return False
 
 
+# ── Mainsail preset ──────────────────────────────────────────────────────────
+
+# Fixed UUID so we always update the same preset entry rather than creating new ones
+MAINSAIL_NFC_PRESET_ID = "nfc-filament-00000000"
+
+
+def update_mainsail_preset(moonraker_url: str, spool_data: dict) -> bool:
+    """Create or update a Mainsail preheat preset from spool filament data.
+
+    Writes to Moonraker's database under the 'mainsail' namespace so Mainsail
+    picks it up as a preheat preset (visible in the temperature panel).
+    """
+    filament = spool_data.get("filament", {})
+    vendor = filament.get("vendor", {}) or {}
+
+    extruder_temp = filament.get("settings_extruder_temp")
+    bed_temp = filament.get("settings_bed_temp")
+
+    if not extruder_temp and not bed_temp:
+        log.debug("Spool has no temperature settings — skipping Mainsail preset")
+        return False
+
+    # Build preset name from filament info
+    parts = []
+    if vendor.get("name"):
+        parts.append(vendor["name"])
+    if filament.get("material"):
+        parts.append(filament["material"])
+    if filament.get("name"):
+        parts.append(filament["name"])
+    preset_name = " ".join(parts) if parts else f"Spool #{spool_data.get('id', '?')}"
+
+    # Build Mainsail preset values
+    # Format: {heater_name: {bool: enabled, type: "heater"|"temperature_fan", value: temp}}
+    values = {}
+    if extruder_temp:
+        values["extruder"] = {"bool": True, "type": "heater", "value": int(extruder_temp)}
+    if bed_temp:
+        values["heater_bed"] = {"bool": True, "type": "heater", "value": int(bed_temp)}
+
+    preset = {
+        "name": f"NFC: {preset_name}",
+        "gcode": "",
+        "values": values,
+    }
+
+    try:
+        resp = requests.post(
+            f"{moonraker_url}/server/database/item",
+            json={
+                "namespace": "mainsail",
+                "key": f"presets.presets.{MAINSAIL_NFC_PRESET_ID}",
+                "value": preset,
+            },
+            timeout=5,
+        )
+        resp.raise_for_status()
+        log.info(f"Mainsail preset updated: '{preset['name']}' "
+                 f"(extruder={extruder_temp}, bed={bed_temp})")
+        return True
+
+    except requests.RequestException as e:
+        log.error(f"Mainsail preset update failed: {e}")
+        return False
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -159,6 +242,7 @@ def main():
     poll_interval = cfg.getfloat("nfc", "poll_interval", fallback=0.5)
     debounce_time = cfg.getfloat("nfc", "debounce_time", fallback=5.0)
     auto_create = cfg.getboolean("nfc", "auto_create", fallback=False)
+    mainsail_preset = cfg.getboolean("nfc", "mainsail_preset", fallback=True)
     spoolman_url = cfg.get("spoolman", "url", fallback="http://localhost:7912")
     moonraker_url = cfg.get("moonraker", "url", fallback="http://localhost:7125")
 
@@ -171,6 +255,7 @@ def main():
     log.info(f"  Poll interval: {poll_interval}s")
     log.info(f"  Debounce:      {debounce_time}s")
     log.info(f"  Auto-create:   {auto_create}")
+    log.info(f"  Mainsail preset: {mainsail_preset}")
 
     last_uid: str | None = None
     last_time: float = 0.0
@@ -214,6 +299,12 @@ def main():
                 if set_active_spool(moonraker_url, spool_id):
                     last_uid = uid_hex
                     last_time = now
+
+                    # Update Mainsail preheat preset with filament temps
+                    if mainsail_preset:
+                        spool_data = get_spool_details(spoolman_url, spool_id)
+                        if spool_data:
+                            update_mainsail_preset(moonraker_url, spool_data)
 
                 time.sleep(poll_interval)
 

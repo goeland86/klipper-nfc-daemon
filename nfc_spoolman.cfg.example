@@ -34,6 +34,10 @@ debounce_time = 5.0
 # (only for OpenPrintTag — creates vendor + filament + spool from tag data)
 auto_create = false
 
+# Update Mainsail preheat preset when a spool is detected
+# Creates/updates an "NFC: ..." preset with extruder and bed temps from Spoolman
+mainsail_preset = true
+
 [spoolman]
 # URL of your Spoolman instance
 url = http://localhost:7912
