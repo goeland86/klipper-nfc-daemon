@@ -121,7 +121,83 @@ sudo systemctl restart nfc-spoolman
 
 Logs are also written to `~/printer_data/logs/nfc_spoolman.log`.
 
-## Klipper integration
+## Multi-tool mode (StealthChanger, IDEX, etc.)
+
+For printers with multiple tools, set `mode = multi_tool` in the config. Instead of silently setting the global spool, the daemon will show a **KlipperScreen prompt** each time a spool is scanned, letting you assign it to a specific tool.
+
+### Setup
+
+1. Add `[respond]` to your `printer.cfg` (required for the prompt dialog):
+
+   ```ini
+   [respond]
+   ```
+
+2. Include the NFC macros in your `printer.cfg`:
+
+   ```ini
+   [include nfc_macros.cfg]
+   ```
+
+   Copy `nfc_macros.cfg` from this repo to `~/printer_data/config/`.
+
+3. Set the mode in `nfc_spoolman.cfg`:
+
+   ```ini
+   [nfc]
+   mode = multi_tool
+   ```
+
+4. Restart the daemon:
+
+   ```bash
+   sudo systemctl restart nfc-spoolman
+   ```
+
+### How it works
+
+1. You scan a spool on the NFC reader
+2. The daemon looks up the spool in Spoolman
+3. A KlipperScreen dialog appears: **"Assign Spool: PolyTerra PLA Red"** with buttons **[T0] [T1] [T2]** ...
+4. You tap a tool button on the touchscreen
+5. The spool is assigned to that tool in Moonraker's Spoolman integration
+6. Per-tool filament metadata is saved to Klipper variables (if `[save_variables]` is configured)
+
+The daemon auto-discovers available tools at startup by querying Moonraker — it checks for a `toolchanger` object (klipper_toolchanger plugin) first, then falls back to counting extruder objects.
+
+### Per-tool saved variables
+
+When `[save_variables]` is configured, `NFC_ASSIGN_TOOL` saves per-tool variables with a `nfc_tN_` prefix:
+
+| Variable | Example (T0) | Example (T2) |
+|----------|-------------|---------------|
+| `nfc_t0_spool_id` | `42` | `nfc_t2_spool_id = 87` |
+| `nfc_t0_material` | `"PLA"` | `nfc_t2_material = "ASA"` |
+| `nfc_t0_extruder_temp` | `210` | `nfc_t2_extruder_temp = 260` |
+| `nfc_t0_bed_temp` | `60` | `nfc_t2_bed_temp = 100` |
+| `nfc_t0_vendor` | `"PolyTerra"` | `nfc_t2_vendor = "eSun"` |
+
+Use them in macros:
+
+```ini
+[gcode_macro PRINT_START]
+gcode:
+    {% set svv = printer.save_variables.variables %}
+    ; Get temps for the first tool being used
+    {% set extruder = svv.nfc_t0_extruder_temp|default(200)|int %}
+    {% set bed = svv.nfc_t0_bed_temp|default(60)|int %}
+    M140 S{bed}
+    M109 S{extruder}
+    M190 S{bed}
+```
+
+### Useful macros
+
+- `NFC_STATUS` — print current per-tool spool assignments to the console
+- `NFC_CANCEL` — dismiss the prompt without assigning
+- `_NFC_STATE` — show the pending (just-scanned) spool info
+
+## Klipper integration (single-tool mode)
 
 ### Klipper variables (`klipper_variables = true`)
 
