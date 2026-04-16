@@ -18,6 +18,10 @@ _CMD_INLISTPASSIVETARGET = 0x4A
 _CMD_INDATAEXCHANGE = 0x40
 _NTAG_CMD_READ = 0x30
 
+# PN532 HSU wakeup preamble — the PN532 drops back to sleep between UART
+# transactions in HSU mode; this must be sent before every command.
+_HSU_WAKEUP = bytes([0x55] * 16 + [0x00, 0x00, 0x00])
+
 
 class PN532Reader(NfcReader):
     """PN532 over UART. Reads ISO 14443A tags (NTAG213/215/216)."""
@@ -32,7 +36,6 @@ class PN532Reader(NfcReader):
 
     def open(self) -> bool:
         try:
-            # Open without DTR/RTS toggle to avoid resetting an ESP32 bridge
             self._ser = serial.Serial()
             self._ser.port = self._port
             self._ser.baudrate = self._baudrate
@@ -82,7 +85,7 @@ class PN532Reader(NfcReader):
     # ── Low-level PN532 protocol ─────────────────────────────────────────
 
     def _wakeup(self):
-        self._ser.write(b'\x55' * 24 + b'\x00\x00\x00')
+        self._ser.write(_HSU_WAKEUP)
         time.sleep(0.5)
         self._ser.reset_input_buffer()
 
@@ -133,6 +136,7 @@ class PN532Reader(NfcReader):
 
     def _send_command(self, cmd: int, params: bytes = b'', timeout: float = 1.0) -> bytes | None:
         self._ser.reset_input_buffer()
+        self._ser.write(_HSU_WAKEUP)
         self._write_frame(bytes([cmd]) + params)
         resp = self._read_response(timeout=timeout)
         if resp is None:
