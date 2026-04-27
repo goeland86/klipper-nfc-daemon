@@ -36,6 +36,9 @@ class PN532Reader(NfcReader):
 
     def open(self) -> bool:
         try:
+            # Suppress DTR/RTS toggle on open — some USB-UART adapters
+            # (PL2303, FTDI) pulse these lines, which can momentarily disturb
+            # power or reset signaling on the PN532.
             self._ser = serial.Serial()
             self._ser.port = self._port
             self._ser.baudrate = self._baudrate

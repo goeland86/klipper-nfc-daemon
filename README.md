@@ -241,7 +241,9 @@ When enabled, the daemon creates/updates a preheat preset named "NFC: Vendor Mat
 ## Wiring
 
 ### PN532 (UART)
-Set the PN532 to UART mode (DIP switches / solder jumpers). Connect via a USB-UART adapter or directly to GPIO UART pins.
+Set the PN532 to UART mode (DIP switches / solder jumpers). Connect via a USB-UART adapter (e.g. PL2303, FTDI) or directly to GPIO UART pins.
+
+The daemon handles the PN532 HSU wakeup automatically — every command is preceded by the 16-byte `0x55` wakeup preamble, so the chip is reliably awakened even after it has dropped back to low-power between transactions. No external bridge MCU is required.
 
 ### PN5180 (SPI)
 Connect to SPI0 (or your chosen bus) plus two GPIO pins for BUSY and RESET. The PN5180 needs 5V for the RF antenna and 3.3V for logic.
