@@ -50,6 +50,13 @@ mainsail_preset = true
 # Requires [save_variables] in printer.cfg
 klipper_variables = true
 
+# Printer name used in the per-spool Pressure Advance field key (e.g.
+# pa_0_4_<printer_name>). Defaults to the system hostname when unset.
+# Set this when the Pi's hostname differs from how you'd like the printer
+# identified in Spoolman (e.g. host = snapmaker, but you keep the field
+# tied to the printer name "trident").
+# printer_name =
+
 [spoolman]
 # URL of your Spoolman instance
 url = http://localhost:7912

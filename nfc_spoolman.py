@@ -22,12 +22,41 @@ import base64
 import configparser
 import logging
 import os
+import socket
 import sys
 import time
 
 import requests
 
 from readers.base import NfcReader, TagRead
+
+# Nozzle size encoded into the Spoolman extra field name. Edit when the
+# printer's installed nozzle changes (or move to config later if needed).
+# Dots are normalized to underscores in the resolved field key because
+# Spoolman rejects '.' in extra field names.
+PA_NOZZLE_SIZE = "0.4"
+
+
+def _pa_field_name(printer_name: str = "", nozzle: str = PA_NOZZLE_SIZE) -> str:
+    """Build the Spoolman extra field key for this printer's PA values.
+
+    Pattern: ``pa_<nozzle>_<printer>`` with dots in the nozzle string
+    replaced by underscores (e.g. ``pa_0_4_biggyprint``). ``printer_name``
+    defaults to the system hostname; pass a config override to use a name
+    that differs from the host (e.g. when the Pi is called ``snapmaker``
+    but you want the field tied to the printer model ``trident``).
+    """
+    if not printer_name:
+        printer_name = socket.gethostname().split(".", 1)[0]
+    printer_name = printer_name.lower()
+    nozzle_safe = nozzle.replace(".", "_")
+    return f"pa_{nozzle_safe}_{printer_name}"
+
+
+# Default to the hostname at import time. Overwritten in main() when the
+# config supplies a printer_name override. Must match the field key created
+# via POST /api/v1/field/spool/<key>.
+PA_EXTRA_FIELD = _pa_field_name()
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
@@ -275,6 +304,19 @@ def push_klipper_variables(moonraker_url: str, spool_data: dict) -> bool:
     filament = spool_data.get("filament", {})
     vendor = filament.get("vendor", {}) or {}
 
+    # Read PA from the spool's extra fields. Returns None if absent or empty —
+    # -1.0 below is the sentinel for "not set" so the Klipper macro can fall
+    # back to a per-material default.
+    extra = spool_data.get("extra", {}) or {}
+    pa_raw = extra.get(PA_EXTRA_FIELD)
+    try:
+        pa_value = float(pa_raw) if pa_raw not in (None, "", "null") else None
+    except (ValueError, TypeError):
+        log.warning(
+            f"Could not parse PA value '{pa_raw}' from field '{PA_EXTRA_FIELD}' — treating as unset"
+        )
+        pa_value = None
+
     variables = {
         "nfc_spool_id": spool_data.get("id", 0),
         "nfc_material": filament.get("material") or "",
@@ -284,6 +326,7 @@ def push_klipper_variables(moonraker_url: str, spool_data: dict) -> bool:
         "nfc_filament_name": filament.get("name") or "",
         "nfc_color_hex": filament.get("color_hex") or "",
         "nfc_diameter": float(filament.get("diameter") or 0),
+        "nfc_pressure_advance": pa_value if pa_value is not None else -1.0,
     }
 
     cmds = []
@@ -292,15 +335,20 @@ def push_klipper_variables(moonraker_url: str, spool_data: dict) -> bool:
             # Strings need nested quotes for SAVE_VARIABLE
             cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE='\"{ val }\"'")
         elif isinstance(val, float):
-            cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE={val:.2f}")
+            cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE={val:.4f}")
         else:
             cmds.append(f"SAVE_VARIABLE VARIABLE={key} VALUE={val}")
 
     gcode = "\n".join(cmds)
     success = run_gcode(moonraker_url, gcode)
     if success:
-        log.info(f"Klipper variables set: material={variables['nfc_material']}, "
-                 f"extruder={variables['nfc_extruder_temp']}, bed={variables['nfc_bed_temp']}")
+        pa_display = variables["nfc_pressure_advance"]
+        pa_str = f"{pa_display:.4f}" if pa_display >= 0 else "unset (fallback)"
+        log.info(
+            f"Klipper variables set: material={variables['nfc_material']}, "
+            f"extruder={variables['nfc_extruder_temp']}, bed={variables['nfc_bed_temp']}, "
+            f"PA={pa_str}"
+        )
     return success
 
 
@@ -387,6 +435,15 @@ def send_nfc_prompt(
     extruder_temp = int(filament.get("settings_extruder_temp") or 0)
     bed_temp = int(filament.get("settings_bed_temp") or 0)
 
+    # Retrieve PA the same way as push_klipper_variables does, so multi-tool
+    # prints get the same per-spool tuning after the user picks a tool.
+    extra = spool_data.get("extra", {}) or {}
+    pa_raw = extra.get(PA_EXTRA_FIELD)
+    try:
+        pending_pa = float(pa_raw) if pa_raw not in (None, "", "null") else -1.0
+    except (ValueError, TypeError):
+        pending_pa = -1.0
+
     # Store pending spool data in _NFC_STATE macro variables so
     # NFC_ASSIGN_TOOL can read them when the user picks a tool.
     cmds = [
@@ -398,6 +455,7 @@ def send_nfc_prompt(
         f"SET_GCODE_VARIABLE MACRO=_NFC_STATE VARIABLE=pending_extruder_temp VALUE={extruder_temp}",
         f"SET_GCODE_VARIABLE MACRO=_NFC_STATE VARIABLE=pending_bed_temp VALUE={bed_temp}",
         f"SET_GCODE_VARIABLE MACRO=_NFC_STATE VARIABLE=pending_diameter VALUE={float(filament.get('diameter') or 1.75):.2f}",
+        f"SET_GCODE_VARIABLE MACRO=_NFC_STATE VARIABLE=pending_pressure_advance VALUE={pending_pa:.4f}",
     ]
 
     # Build the action:prompt dialog
@@ -438,6 +496,10 @@ def main():
     mode = cfg.get("nfc", "mode", fallback="single").lower()
     spoolman_url = cfg.get("spoolman", "url", fallback="http://localhost:7912")
     moonraker_url = cfg.get("moonraker", "url", fallback="http://localhost:7125")
+    printer_name_override = cfg.get("nfc", "printer_name", fallback="").strip()
+
+    global PA_EXTRA_FIELD
+    PA_EXTRA_FIELD = _pa_field_name(printer_name=printer_name_override)
 
     reader = create_reader(cfg)
 
@@ -459,6 +521,7 @@ def main():
         log.info(f"  Klipper vars:  {klipper_variables}")
     else:
         log.info(f"  Tools:         {tools}")
+    log.info(f"  PA field:      {PA_EXTRA_FIELD}")
 
     last_uid: str | None = None
     last_time: float = 0.0
