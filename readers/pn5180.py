@@ -1,5 +1,7 @@
 """PN5180 SPI NFC reader — ISO 14443A + ISO 15693."""
 
+from __future__ import annotations
+
 import logging
 import time
 

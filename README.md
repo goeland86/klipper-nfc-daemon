@@ -31,7 +31,7 @@ The daemon includes debouncing so the same tag won't re-trigger within a configu
 - A Klipper host (Raspberry Pi, BeagleBone, etc.) running Moonraker
 - One of the supported NFC readers (see above)
 - **Spoolman** with NFC endpoints enabled (`SPOOLMAN_TIGERTAG_ENABLED=TRUE`, `SPOOLMAN_NFC_ENABLED=TRUE`)
-- Python 3.10+
+- Python 3.9+
 
 ## Installation
 

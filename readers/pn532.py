@@ -1,5 +1,7 @@
 """PN532 UART NFC reader — ISO 14443A (NTAG) only."""
 
+from __future__ import annotations
+
 import logging
 import time
 

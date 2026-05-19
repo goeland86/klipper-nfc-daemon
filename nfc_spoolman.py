@@ -18,6 +18,8 @@ Supports multiple reader backends:
 Configuration: ~/printer_data/config/nfc_spoolman.cfg
 """
 
+from __future__ import annotations
+
 import base64
 import configparser
 import logging

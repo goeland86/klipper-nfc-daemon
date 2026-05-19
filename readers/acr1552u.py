@@ -1,5 +1,7 @@
 """ACR1552U USB NFC reader — ISO 14443A + ISO 15693 via PC/SC."""
 
+from __future__ import annotations
+
 import logging
 import time
 
