@@ -30,8 +30,25 @@ The daemon includes debouncing so the same tag won't re-trigger within a configu
 
 - A Klipper host (Raspberry Pi, BeagleBone, etc.) running Moonraker
 - One of the supported NFC readers (see above)
-- **Spoolman** with NFC endpoints enabled (`SPOOLMAN_TIGERTAG_ENABLED=TRUE`, `SPOOLMAN_NFC_ENABLED=TRUE`)
+- **Spoolman** with NFC endpoints enabled (`SPOOLMAN_TIGERTAG_ENABLED=TRUE`, `SPOOLMAN_NFC_ENABLED=TRUE`) — see [Integration ecosystem](#integration-ecosystem) below for the fork that provides these
 - Python 3.9+
+
+## Integration ecosystem
+
+This daemon is part of a broader 3D-printing tooling stack maintained at
+[github.com/goeland86](https://github.com/goeland86). For tested
+end-to-end behavior, pair it with these components:
+
+| Component | Source | Required? | Why this fork / repo |
+|-----------|--------|-----------|-----------------------|
+| **Spoolman** | [`goeland86/Spoolman`](https://github.com/goeland86/Spoolman) branch [`pr/nfc-support`](https://github.com/goeland86/Spoolman/tree/pr/nfc-support) | **Required** | Adds the `/api/v1/nfc/lookup` endpoint and the `SPOOLMAN_TIGERTAG_ENABLED` / `SPOOLMAN_NFC_ENABLED` env vars the daemon depends on. Not yet merged into upstream [`Donkie/Spoolman`](https://github.com/Donkie/Spoolman). |
+| **Moonraker host** | upstream [Klipper](https://github.com/Klipper3d/klipper) + [Moonraker](https://github.com/Arksine/moonraker), **or** [`goeland86/snapmaker_moonraker`](https://github.com/goeland86/snapmaker_moonraker) | Required (one of the two) | The daemon speaks Moonraker JSON-RPC and pushes Klipper macros (`SAVE_VARIABLE`, `RESPOND TYPE=command MSG="action:prompt_*"`). On a Snapmaker J1S the `snapmaker_moonraker` bridge natively intercepts these so the daemon works without real Klipper. |
+| **Web UI** | [Mainsail](https://github.com/mainsail-crew/mainsail), [Fluidd](https://github.com/fluidd-core/fluidd), or [KlipperScreen](https://github.com/KlipperScreen/KlipperScreen) | Recommended | UI-agnostic — the daemon only uses the standard `notify_gcode_response` prompt protocol every current Klipper-compatible frontend renders. Upstream versions are fine. |
+
+Single-tool mode (`mode = single`) works against any of the above with no
+extra config. Multi-tool mode requires either real Klipper with
+`[respond]` + `[save_variables]` configured (see [Multi-tool mode](#multi-tool-mode-stealthchanger-idex-etc) below)
+or the `snapmaker_moonraker` bridge.
 
 ## Installation
 
