@@ -78,6 +78,28 @@ sudo apt install pcscd libpcsclite-dev
 ~/nfc-spoolman-env/bin/pip install pyscard
 ```
 
+## Moonraker update manager
+
+To receive update notifications in Mainsail or Fluidd (same badge system as Klipper and Moonraker), add this block to your `moonraker.conf`:
+
+```ini
+[update_manager nfc-spoolman]
+type: git_repo
+path: ~/klipper-nfc-daemon
+origin: https://github.com/goeland86/klipper-nfc-daemon.git
+primary_branch: main
+virtualenv: ~/nfc-spoolman-env
+requirements: requirements.txt
+managed_services: nfc-spoolman
+```
+
+Replace `~/klipper-nfc-daemon` with the actual path where you cloned this repo if different. Moonraker will:
+- Poll GitHub for new commits
+- Show an update badge in the UI when updates are available
+- Run `git pull` + reinstall Python deps + restart the `nfc-spoolman` service when you click Update
+
+Restart Moonraker after adding the block.
+
 ## Configuration
 
 Edit `~/printer_data/config/nfc_spoolman.cfg`:

@@ -9,20 +9,17 @@ CONFIG_DIR="$INSTALL_DIR/printer_data/config"
 SERVICE_NAME="nfc-spoolman"
 
 echo "=== NFC Spoolman Installer ==="
+echo "  Repo:    $SCRIPT_DIR"
+echo "  Venv:    $VENV_DIR"
 
 # Create venv and install dependencies
 echo "Creating Python virtual environment..."
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip
-"$VENV_DIR/bin/pip" install pyserial requests
-
-# Copy script and readers package
-echo "Installing nfc_spoolman.py and readers..."
-cp "$SCRIPT_DIR/nfc_spoolman.py" "$INSTALL_DIR/nfc_spoolman.py"
-mkdir -p "$INSTALL_DIR/readers"
-cp "$SCRIPT_DIR/readers/"*.py "$INSTALL_DIR/readers/"
+"$VENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements.txt"
 
 # Copy config if it doesn't exist
+mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_DIR/nfc_spoolman.cfg" ]; then
     echo "Installing example config to $CONFIG_DIR/nfc_spoolman.cfg..."
     cp "$SCRIPT_DIR/nfc_spoolman.cfg.example" "$CONFIG_DIR/nfc_spoolman.cfg"
@@ -34,10 +31,15 @@ fi
 # Create log directory
 mkdir -p "$INSTALL_DIR/printer_data/logs"
 
-# Install systemd service
+# Install systemd service — replace placeholders:
+#   /home/debian/klipper-nfc-daemon  →  SCRIPT_DIR (repo root, run in-place)
+#   /home/debian                     →  INSTALL_DIR (home dir, for venv path)
+#   User=debian                      →  current user
 echo "Installing systemd service..."
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-sed "s|User=debian|User=$(whoami)|g; s|/home/debian|$INSTALL_DIR|g" \
+sed "s|User=debian|User=$(whoami)|g; \
+     s|/home/debian/klipper-nfc-daemon|$SCRIPT_DIR|g; \
+     s|/home/debian|$INSTALL_DIR|g" \
     "$SCRIPT_DIR/nfc-spoolman.service" | sudo tee "$SERVICE_FILE" > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
@@ -53,6 +55,17 @@ fi
 
 echo ""
 echo "=== Installation complete ==="
+echo "  Daemon runs from: $SCRIPT_DIR"
 echo "  1. Edit $CONFIG_DIR/nfc_spoolman.cfg"
 echo "  2. Start with: sudo systemctl start $SERVICE_NAME"
 echo "  3. Check logs: journalctl -u $SERVICE_NAME -f"
+echo ""
+echo "  To enable update notifications in Mainsail/Fluidd, add to moonraker.conf:"
+echo "    [update_manager nfc-spoolman]"
+echo "    type: git_repo"
+echo "    path: $SCRIPT_DIR"
+echo "    origin: https://github.com/goeland86/klipper-nfc-daemon.git"
+echo "    primary_branch: main"
+echo "    virtualenv: $VENV_DIR"
+echo "    requirements: requirements.txt"
+echo "    managed_services: $SERVICE_NAME"

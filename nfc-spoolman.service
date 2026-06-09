@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=debian
-ExecStart=/home/debian/nfc-spoolman-env/bin/python3 /home/debian/nfc_spoolman.py
+WorkingDirectory=/home/debian/klipper-nfc-daemon
+ExecStart=/home/debian/nfc-spoolman-env/bin/python3 /home/debian/klipper-nfc-daemon/nfc_spoolman.py
 Restart=on-failure
 RestartSec=5
 
